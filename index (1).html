@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<title>Imposter – Word Game</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<style>
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;overflow:hidden;background:#070a14;color:#eaf2ff;font-family:Georgia,"Times New Roman",serif}
+canvas{display:block}
+#lobby{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 30%,#2a1238,#070a14 70%);z-index:5;padding:20px}
+.box{width:100%;max-width:360px;display:flex;flex-direction:column;gap:12px}
+h1{font-size:46px;font-weight:700;letter-spacing:-1px;line-height:1}
+h1 span{color:#fb7185}
+p.s{opacity:.7;font-size:15px}
+input,button{font:inherit;font-size:18px;padding:13px;border-radius:14px;border:1px solid #3a2c66;background:#150f33;color:inherit;width:100%}
+#code{text-transform:uppercase;letter-spacing:6px;text-align:center}
+button{background:#fb7185;color:#2a0612;border:0;font-weight:700;cursor:pointer}
+button.alt{background:#5eead4;color:#04201c}
+button:disabled{opacity:.4}
+.row{display:flex;gap:8px}
+#msg{color:#fda4af;min-height:20px;font-size:14px}
+#badge{position:fixed;top:max(10px,env(safe-area-inset-top));left:10px;z-index:4;background:#000a;padding:7px 12px;border-radius:12px;font-size:14px;display:none}
+#badge b{letter-spacing:3px;color:#5eead4;font-size:17px}
+#badge button{width:auto;padding:3px 9px;font-size:12px;margin-left:6px;border-radius:8px}
+#ui{position:fixed;left:0;right:0;bottom:0;max-height:56vh;overflow:auto;z-index:4;display:none;padding:16px 16px max(16px,env(safe-area-inset-bottom));background:linear-gradient(#070a1400,#070a14ee 18%);}
+#ui .in{max-width:460px;margin:0 auto;display:flex;flex-direction:column;gap:10px;font-size:17px}
+.big{font-size:46px;font-weight:700;letter-spacing:9px;color:#5eead4;text-align:center}
+.w{color:#facc15;font-size:26px}.imp{color:#fb7185;font-size:20px}
+.hl{background:#150f33cc;border-radius:12px;padding:8px 12px;font-size:16px;display:flex;flex-direction:column;gap:3px;max-height:120px;overflow:auto}
+.tm{opacity:.75;font-size:14px;text-align:right}
+.vb{display:flex;flex-wrap:wrap;gap:8px}
+.vb button{flex:1 1 40%;background:#150f33;color:inherit;border:2px solid #3a2c66}
+.vb button.sel{border-color:#fb7185;background:#3a1530}
+.res{font-size:22px;font-weight:700;text-align:center}
+</style>
+</head>
+<body>
+<div id="lobby"><div class="box">
+  <h1>Impos<span>ter</span></h1>
+  <p class="s">Sabko ek secret word milta hai, sirf imposter ko nahi. Hint do, pakdo.</p>
+  <input id="name" placeholder="Aapka naam" maxlength="12">
+  <button id="create">Room banao</button>
+  <div class="row"><input id="code" placeholder="CODE" maxlength="4"><button id="join" class="alt" style="width:auto">Join</button></div>
+  <div id="msg"></div>
+</div></div>
+<div id="badge"></div>
+<div id="ui"><div class="in" id="uin"></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const PRE='imposter-v1-',T_HINT=25000,T_VOTE=40000,ROUNDS=2,MIN=3;
+const COLS=[0x5eead4,0xf472b6,0xfacc15,0x60a5fa,0xa78bfa,0xfb923c,0x4ade80,0xf87171];
+const WORDS={
+ 'Khana':['Pizza','Biryani','Samosa','Golgappa','Maggi','Dosa','Jalebi','Paneer'],
+ 'Jaanwar':['Sher','Haathi','Tota','Bandar','Oont','Mor','Machhli','Billi'],
+ 'Jagah':['Beach','School','Hospital','Airport','Mela','Mandir','Cinema','Railway Station'],
+ 'Cheez':['Chhatri','Mobile','Ghadi','Cycle','Kursi','Chashma','Pankha','Tala'],
+ 'Kaam':['Cricket','Shaadi','Safar','Padhai','Cooking','Dance','Neend','Shopping']};
+const esc=s=>String(s).replace(/[<>&"]/g,'');
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+let peer,isHost=false,myId='',code='',conns={},players={},hostConn=null,started=false,myName='',myRole=null,myVote='',lastSig='';
+let G={ph:'wait',cat:'',order:[],turn:0,hints:[],voted:[],left:0,res:null},dlLocal=0;
+let H={ph:'wait',cat:'',word:'',imp:'',order:[],turn:0,hints:[],votes:{},dl:0,res:null};
+try{$('name').value=localStorage.getItem('impname')||''}catch(e){}
+const q=new URLSearchParams(location.search).get('room');if(q)$('code').value=q.toUpperCase();
+const say=t=>$('msg').textContent=t;
+function nm(){const n=esc($('name').value.trim()||'Player'+Math.floor(Math.random()*90+10)).slice(0,12);try{localStorage.setItem('impname',n)}catch(e){}return n}
+function rndCode(){const a='ABCDEFGHJKLMNPQRSTUVWXYZ';let s='';for(let i=0;i<4;i++)s+=a[Math.floor(Math.random()*a.length)];return s}
+
+/* ---------- Networking ---------- */
+function createRoom(){
+  myName=nm();code=rndCode();say('Room ban raha hai...');
+  peer=new Peer(PRE+code);
+  peer.on('open',()=>{isHost=true;myId='host';players.host={n:myName,c:0};enter();setInterval(hostTick,250)});
+  peer.on('error',e=>{if(e.type==='unavailable-id'){peer.destroy();createRoom()}else say('Error: '+e.type)});
+  peer.on('connection',c=>{
+    c.on('open',()=>{
+      conns[c.peer]=c;const used=Object.values(players).map(p=>p.c);let col=0;while(used.includes(col))col++;
+      players[c.peer]={n:'?',c:col%COLS.length};c.send({t:'hi',id:c.peer,c:col%COLS.length});bc();
+    });
+    c.on('data',d=>{
+      if(d.t==='hello'&&players[c.peer]){players[c.peer].n=esc(d.n).slice(0,12);bc()}
+      else if(d.t==='hint')onHint(c.peer,d.x);
+      else if(d.t==='vote')onVote(c.peer,d.x);
+    });
+    c.on('close',()=>{delete conns[c.peer];delete players[c.peer];bc()});
+  });
+}
+function joinRoom(){
+  code=$('code').value.trim().toUpperCase();if(code.length!==4){say('4 akshar ka code daalo');return}
+  myName=nm();say('Judd raha hai...');peer=new Peer();
+  peer.on('open',id=>{
+    myId=id;hostConn=peer.connect(PRE+code,{reliable:true});
+    const to=setTimeout(()=>{if(!started)say('Room nahi mila. Code check karo.')},8000);
+    hostConn.on('data',d=>{
+      if(d.t==='hi'){if(!started){clearTimeout(to);enter()}hostConn.send({t:'hello',n:myName})}
+      else if(d.t==='s')apply(d);
+      else if(d.t==='role'){myRole={word:d.word,cat:d.cat};lastSig='';render()}
+    });
+    hostConn.on('close',()=>{alert('Host ne room band kar diya');location.href=location.pathname});
+  });
+  peer.on('error',e=>say(e.type==='peer-unavailable'?'Room nahi mila. Code check karo.':'Error: '+e.type));
+}
+function view(){return{ph:H.ph,cat:H.cat,order:H.order,turn:H.turn,hints:H.hints,voted:Object.keys(H.votes),left:Math.max(0,H.dl-Date.now()),res:H.res}}
+function bc(){if(!isHost)return;const m={t:'s',p:players,g:view()};for(const id in conns)conns[id].send(m);apply(m)}
+function apply(m){players=m.p;G=m.g;dlLocal=Date.now()+G.left;if(G.ph==='wait'){myRole=null;myVote=''}render()}
+function act(t,x){if(isHost){t==='hint'?onHint('host',x):onVote('host',x)}else if(hostConn&&hostConn.open)hostConn.send({t,x})}
+
+/* ---------- Host game logic ---------- */
+function turnId(){return H.order[H.turn%(H.order.length||1)]||''}
+function startGame(){
+  const ids=Object.keys(players);if(ids.length<MIN||H.ph==='hint'||H.ph==='vote')return;
+  const cat=pick(Object.keys(WORDS)),word=pick(WORDS[cat]),imp=pick(ids);
+  H={ph:'hint',cat,word,imp,order:shuffle(ids),turn:0,hints:[],votes:{},dl:Date.now()+T_HINT,res:null};
+  for(const id of ids)if(id!=='host')conns[id]&&conns[id].send({t:'role',word:id===imp?null:word,cat});
+  myRole={word:imp==='host'?null:word,cat};myVote='';lastSig='';bc();
+}
+function advance(){H.turn++;if(H.turn>=H.order.length*ROUNDS){H.ph='vote';H.dl=Date.now()+T_VOTE}else H.dl=Date.now()+T_HINT}
+function onHint(id,txt){
+  if(H.ph!=='hint'||turnId()!==id)return;
+  H.hints.push({id,t:esc(txt||'—').slice(0,20)||'—'});advance();bc();
+}
+function onVote(id,t){
+  if(H.ph!=='vote'||id===t||!H.order.includes(id)||!H.order.includes(t)||!players[t])return;
+  H.votes[id]=t;
+  const need=H.order.filter(i=>players[i]).length;
+  if(Object.keys(H.votes).filter(i=>players[i]).length>=need)finish();
+  bc();
+}
+function finish(){
+  const cnt={};Object.values(H.votes).forEach(t=>cnt[t]=(cnt[t]||0)+1);
+  const mx=Math.max(0,...Object.values(cnt)),top=Object.keys(cnt).filter(k=>cnt[k]===mx);
+  H.ph='result';H.res={imp:H.imp,impName:players[H.imp]?players[H.imp].n:'(chala gaya)',word:H.word,cat:H.cat,cnt,caught:top.length===1&&top[0]===H.imp};
+}
+function hostTick(){
+  if(H.ph==='hint'){if(!players[turnId()]||Date.now()>H.dl){const id=turnId();H.hints.push({id,t:'—'});advance()}}
+  else if(H.ph==='vote'&&Date.now()>H.dl)finish();
+  bc();
+}
+function again(){H={ph:'wait',cat:'',word:'',imp:'',order:[],turn:0,hints:[],votes:{},dl:0,res:null};myRole=null;bc()}
+
+/* ---------- UI ---------- */
+const nameOf=id=>esc(players[id]?players[id].n:'?');
+const hex=id=>'#'+COLS[(players[id]?players[id].c:0)%COLS.length].toString(16).padStart(6,'0');
+const chip=id=>`<b style="color:${hex(id)}">${nameOf(id)}</b>`;
+function roleLine(){
+  if(!G.order.includes(myId))return'Aap spectator ho. Agle round ka intezaar karo.';
+  if(!myRole)return'Role aa raha hai...';
+  return myRole.word?`Category: <b>${esc(myRole.cat)}</b><br>Aapka word: <b class="w">${esc(myRole.word)}</b>`
+   :`Category: <b>${esc(myRole.cat)}</b><br><b class="imp">Aap IMPOSTER ho!</b> Word nahi pata, hints se andaaza lagao.`;
+}
+const hintsHtml=()=>G.hints.length?`<div class="hl">${G.hints.map(h=>`<div>${chip(h.id)}: ${esc(h.t)}</div>`).join('')}</div>`:'';
+function render(){
+  const sig=[G.ph,G.turn,G.hints.length,G.voted.join(),Object.values(players).map(p=>p.n).join(),!!myRole,myVote,G.res?1:0].join('|');
+  if(sig===lastSig)return;lastSig=sig;
+  const n=Object.keys(players).length,tid=G.order[G.turn%(G.order.length||1)]||'',u=$('uin');let h='';
+  if(G.ph==='wait'){
+    h=`<p class="s" style="text-align:center">Room code doston ko bhejo</p><div class="big">${code}</div>
+    <div>${Object.keys(players).map(id=>`<div>${chip(id)}${id==='host'?' (host)':''}${id===myId?' (aap)':''}</div>`).join('')}</div>`
+    +(isHost?`<button id="st" ${n<MIN?'disabled':''}>${n<MIN?'Kam se kam '+MIN+' players chahiye':'Game shuru karo'}</button>`:'<p class="s" style="text-align:center">Host ke start karne ka intezaar hai...</p>');
+  }else if(G.ph==='hint'){
+    h=`<div>${roleLine()}</div>${hintsHtml()}`+(tid===myId&&G.order.includes(myId)
+      ?`<div class="row"><input id="hin" maxlength="20" placeholder="Ek chhota hint likho"><button id="hs" style="width:auto">Bhejo</button></div>`
+      :`<div>${chip(tid)} hint soch raha hai...</div>`)
+      +`<div class="tm">Round ${Math.floor(G.turn/G.order.length)+1}/${ROUNDS} · <span id="tm"></span></div>`;
+  }else if(G.ph==='vote'){
+    const can=G.order.includes(myId);
+    h=`<div>${roleLine()}</div>${hintsHtml()}<div><b>Imposter kaun hai? Vote karo</b></div><div class="vb">`
+      +G.order.filter(i=>players[i]&&i!==myId).map(i=>`<button data-id="${i}" class="${myVote===i?'sel':''}" ${can?'':'disabled'}>${nameOf(i)}</button>`).join('')
+      +`</div><div class="tm">${G.voted.length}/${G.order.length} ne vote diya · <span id="tm"></span></div>`;
+  }else{
+    const r=G.res;
+    h=`<div class="res" style="color:${r.caught?'#4ade80':'#fb7185'}">${r.caught?'Imposter pakda gaya! Crew jeeti':'Imposter bach gaya! Imposter jeeta'}</div>
+    <div style="text-align:center">Imposter: <b style="color:${hex(r.imp)}">${esc(r.impName)}</b><br>Word: <b class="w">${esc(r.word)}</b> (${esc(r.cat)})</div>
+    <div class="hl">${Object.keys(r.cnt).map(i=>`<div>${chip(i)}: ${r.cnt[i]} vote</div>`).join('')||'Kisi ne vote nahi diya'}</div>`
+    +(isHost?'<button id="ag">Dobara khelo</button>':'<p class="s" style="text-align:center">Host naya round shuru karega...</p>');
+  }
+  u.innerHTML=h;
+  const f=(id,fn)=>{const e=$(id);if(e)e.onclick=fn};
+  f('st',startGame);f('ag',again);
+  f('hs',()=>{const v=$('hin').value.trim();if(v)act('hint',v)});
+  const hi=$('hin');if(hi){hi.onkeydown=e=>{if(e.key==='Enter')$('hs').click()};hi.focus()}
+  u.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{myVote=b.dataset.id;act('vote',myVote);lastSig='';render()});
+}
+function enter(){
+  started=true;$('lobby').style.display='none';$('ui').style.display='block';
+  const url=location.origin+location.pathname+'?room='+code;
+  $('badge').style.display='block';$('badge').innerHTML='Room <b>'+code+'</b><button id="cp">Link copy</button>';
+  $('cp').onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(url);$('cp').textContent='Copy ho gaya'};
+  setInterval(()=>{const e=$('tm');if(e)e.textContent=Math.ceil(Math.max(0,dlLocal-Date.now())/1000)+'s'},250);
+  if(isHost)bc();render();requestAnimationFrame(loop);
+}
+
+/* ---------- 3D scene ---------- */
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.2;
+document.body.appendChild(renderer.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x070a14);scene.fog=new THREE.FogExp2(0x070a14,0.022);
+const cam=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,.1,200);
+scene.add(new THREE.HemisphereLight(0x8f7fff,0x1a1030,.7));
+const sun=new THREE.DirectionalLight(0xffffff,.9);sun.position.set(8,20,6);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
+Object.assign(sun.shadow.camera,{left:-16,right:16,top:16,bottom:-16,near:1,far:50});scene.add(sun);
+const floor=new THREE.Mesh(new THREE.CircleGeometry(18,64),new THREE.MeshStandardMaterial({color:0x14102e,roughness:.35,metalness:.6}));
+floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+const grid=new THREE.PolarGridHelper(18,16,8,64,0x4a2b8a,0x2b1b55);grid.position.y=.02;scene.add(grid);
+const table=new THREE.Mesh(new THREE.CylinderGeometry(3.2,3.2,.6,48),new THREE.MeshStandardMaterial({color:0x1c1440,roughness:.3,metalness:.6}));
+table.position.y=.3;table.castShadow=table.receiveShadow=true;scene.add(table);
+const rim=new THREE.Mesh(new THREE.TorusGeometry(3.2,.1,12,64),new THREE.MeshStandardMaterial({color:0xfb7185,emissive:0xfb7185,emissiveIntensity:2}));
+rim.rotation.x=Math.PI/2;rim.position.y=.62;scene.add(rim);
+const mystery=new THREE.Mesh(new THREE.IcosahedronGeometry(.9,0),new THREE.MeshStandardMaterial({color:0xfacc15,emissive:0xfacc15,emissiveIntensity:1.4,wireframe:true}));
+mystery.position.y=2.2;scene.add(mystery);
+const sg=new THREE.BufferGeometry(),sp=[];for(let i=0;i<500;i++)sp.push((Math.random()-.5)*160,8+Math.random()*50,(Math.random()-.5)*160);
+sg.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));scene.add(new THREE.Points(sg,new THREE.PointsMaterial({size:.3,color:0xd0c0ff})));
+
+const meshes={};
+function makeAvatar(c){
+  const col=COLS[c%COLS.length],g=new THREE.Group();
+  const mat=new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:.4,roughness:.2,metalness:.4});
+  const b=new THREE.Mesh(new THREE.SphereGeometry(.9,32,24),mat);b.position.y=.9;b.castShadow=true;g.add(b);
+  const l=new THREE.PointLight(col,.5,9);l.position.y=1.6;g.add(l);
+  const cv=document.createElement('canvas');cv.width=320;cv.height=110;
+  const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),transparent:true,depthTest:false}));
+  s.scale.set(5,1.72,1);s.position.y=3;g.add(s);
+  g.userData={mat,l,cv,s,key:'',col,pos:new THREE.Vector3()};scene.add(g);return g;
+}
+function label(g,n,h){
+  const k=n+'|'+h;if(g.userData.key===k)return;g.userData.key=k;
+  const x=g.userData.cv.getContext('2d');x.clearRect(0,0,320,110);x.textAlign='center';x.lineJoin='round';
+  x.font='bold 36px Georgia';x.lineWidth=7;x.strokeStyle='#000b';x.fillStyle='#fff';x.strokeText(n,160,40);x.fillText(n,160,40);
+  if(h){x.font='bold 40px Georgia';x.fillStyle='#facc15';x.strokeText(h,160,92);x.fillText(h,160,92)}
+  g.userData.s.material.map.needsUpdate=true;
+}
+let last=0;
+function loop(t){
+  requestAnimationFrame(loop);
+  const ids=Object.keys(players).sort(),n=ids.length||1,tid=G.order[G.turn%(G.order.length||1)]||'';
+  ids.forEach((id,i)=>{
+    const p=players[id];let g=meshes[id];if(!g)g=meshes[id]=makeAvatar(p.c);
+    const a=i/n*Math.PI*2,u=g.userData;u.pos.set(Math.cos(a)*6.5,0,Math.sin(a)*6.5);g.position.lerp(u.pos,.08);
+    const lh=[...G.hints].reverse().find(h=>h.id===id);label(g,p.n,lh?lh.t:'');
+    const active=G.ph==='hint'&&id===tid,isImp=G.ph==='result'&&G.res&&G.res.imp===id;
+    u.mat.emissiveIntensity=active?1.6:.4;u.l.intensity=active?2.2:.5;
+    u.mat.emissive.setHex(isImp?0xff2244:u.col);u.mat.color.setHex(isImp?0xff2244:u.col);
+    g.children[0].position.y=.9+(active||isImp?Math.abs(Math.sin(t/200))*.7:Math.sin(t/700+i)*.08);
+  });
+  for(const id in meshes)if(!players[id]){scene.remove(meshes[id]);delete meshes[id]}
+  mystery.rotation.y=t/900;mystery.rotation.x=t/1300;mystery.position.y=2.2+Math.sin(t/600)*.2;
+  rim.material.emissiveIntensity=1.5+Math.sin(t/500)*.5;
+  const ca=t/9000;cam.position.set(Math.cos(ca)*15,11,Math.sin(ca)*15);cam.lookAt(0,-2.6,0);
+  renderer.render(scene,cam);
+}
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()});
+$('create').onclick=createRoom;$('join').onclick=joinRoom;
+</script>
+</body>
+</html>
